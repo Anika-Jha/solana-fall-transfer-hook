@@ -17,6 +17,7 @@ use {
     solana_pubkey::Pubkey,
     solana_signer::Signer,
     solana_transaction::versioned::VersionedTransaction,
+    token_mover,
 };
 
 pub fn setup() -> (LiteSVM, Keypair, Address) {
@@ -25,6 +26,8 @@ pub fn setup() -> (LiteSVM, Keypair, Address) {
     let bytes = include_bytes!("../../../../target/deploy/solana_fall_transfer_hook.so");
     svm.add_program(program_id, bytes).unwrap();
 
+    let token_mover_bytes = include_bytes!("../../../../target/deploy/token_mover.so");
+    svm.add_program(token_mover::id(), token_mover_bytes).unwrap();
     let payer = Keypair::new();
     svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
 
@@ -156,4 +159,47 @@ pub fn build_transfer_with_hook_ix(
     ix.accounts.push(AccountMeta::new(rate_limit, false));
 
     ix
+}
+pub fn build_transfer_with_mover_ix(
+    source_ata: &Pubkey,
+    dest_ata: &Pubkey,
+    mint: &Pubkey,
+    owner: &Pubkey,
+    hook_program_id: &Address,
+    amount: u64,
+    decimals: u8,
+) -> Instruction {
+    let extra_account_meta_list = Pubkey::find_program_address(
+        &[b"extra-account-metas", mint.as_ref()],
+        hook_program_id,
+    )
+    .0;
+
+    let rate_limit = Pubkey::find_program_address(
+        &[b"rate_limit", mint.as_ref(), owner.as_ref()],
+        hook_program_id,
+    )
+    .0;
+
+    let mut accounts =
+        token_mover::accounts::TransferWithHook {
+            owner: *owner,
+            source_token: *source_ata,
+            mint: *mint,
+            destination_token: *dest_ata,
+            token_program: Token2022::id(),
+        }
+        .to_account_metas(None);
+
+    // Token-2022's execute CPI needs the hook program first,
+    // followed by the extra accounts declared by the hook.
+    accounts.push(AccountMeta::new_readonly(*hook_program_id, false));
+    accounts.push(AccountMeta::new_readonly(extra_account_meta_list, false));
+    accounts.push(AccountMeta::new(rate_limit, false));
+
+    Instruction::new_with_bytes(
+        token_mover::id(),
+        &token_mover::instruction::TransferWithHook { amount, decimals }.data(),
+        accounts,
+    )
 }
